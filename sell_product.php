@@ -1,6 +1,6 @@
 <?php
 session_start();
-if (!isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'admin') {
+if (!isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'staff') {
     header("Location: ../index.php");
     exit;
 }
@@ -94,7 +94,7 @@ include '../includes/header.php';
     <table border="1" cellpadding="8" cellspacing="0" width="100%" style="border-collapse:collapse;">
         <thead style="background:#ddd;">
             <tr>
-                <th>ID</th>
+                <th>Serial</th>
                 <th>Product</th>
                 <th>Quantity</th>
                 <th>Price</th>
@@ -105,9 +105,11 @@ include '../includes/header.php';
             </tr>
         </thead>
         <tbody>
-            <?php while($s = $sold_products->fetch_assoc()): ?>
+            <?php if ($sold_products && $sold_products->num_rows > 0): 
+                $serial = $sold_products->num_rows; // descending serial
+                while($s = $sold_products->fetch_assoc()): ?>
                 <tr>
-                    <td><?php echo $s['id']; ?></td>
+                    <td><?php echo $serial--; ?></td>
                     <td><?php echo htmlspecialchars($s['product_name']); ?></td>
                     <td><?php echo $s['quantity']; ?></td>
                     <td><?php echo number_format($s['price'],2); ?></td>
@@ -118,7 +120,11 @@ include '../includes/header.php';
                         <a href="generate_invoice.php?sell_id=<?php echo $s['id']; ?>" target="_blank" class="btn-add" style="padding:5px 10px; text-decoration:none; border-radius:3px; display:inline-block;">Invoice</a>
                     </td>
                 </tr>
-            <?php endwhile; ?>
+            <?php endwhile; else: ?>
+                <tr>
+                    <td colspan="8" style="text-align:center; color:red; padding: 20px;">No sales found.</td>
+                </tr>
+            <?php endif; ?>
         </tbody>
     </table>
 </div>
