@@ -1,7 +1,6 @@
 <?php
-ob_start(); // Start output buffering
 session_start();
-if (!isset($_SESSION['user_role']) || !in_array($_SESSION['user_role'], ['admin','staff'])) {
+if (!isset($_SESSION['user_role']) || !in_array($_SESSION['user_role'], ['admin','staff','supplier'])) {
     header("Location: ../index.php");
     exit;
 }
@@ -9,121 +8,182 @@ if (!isset($_SESSION['user_role']) || !in_array($_SESSION['user_role'], ['admin'
 include '../config.php';
 include '../includes/header.php';
 
-// --- Fetch Delivered Purchase Orders (Suppliers) ---
-$supplier_delivered = $conn->query("
-    SELECT po.id, po.product_id, p.name AS product_name, po.quantity, po.status, po.created_at, p.price
-    FROM purchase_orders po
-    JOIN products p ON po.product_id = p.id
-    WHERE po.status = 'delivered'
-    ORDER BY po.created_at DESC
-");
-
-// --- Fetch Delivered Customer Orders (Admin grant -> Staff delivered) ---
-$customer_delivered = $conn->query("
-    SELECT co.id, co.product_id, p.name AS product_name, co.quantity, co.status, co.order_date AS created_at, co.price
-    FROM customer_orders co
-    JOIN products p ON co.product_id = p.id
-    WHERE co.status = 'delivered'
-    ORDER BY co.order_date DESC
-");
-
-$delivered_rows = [];
-if ($supplier_delivered) {
-    while ($row = $supplier_delivered->fetch_assoc()) {
-        $row['source'] = 'supplier';
-        $delivered_rows[] = $row;
-    }
-}
-if ($customer_delivered) {
-    while ($row = $customer_delivered->fetch_assoc()) {
-        $row['source'] = 'customer';
-        $delivered_rows[] = $row;
-    }
+$supplier_id = 0;
+if (file_exists('../includes/supplier_helpers.php')) {
+    include '../includes/supplier_helpers.php';
+    $supplier_id = getResolvedSupplierId($conn);
 }
 
-// Sort all delivered rows by newest first
-usort($delivered_rows, function($a, $b) {
-    return strtotime($b['created_at']) <=> strtotime($a['created_at']);
-});
+// ------------------ Update stock for delivered orders ------------------
+$delivered_orders = null;
+if ($supplier_id > 0) {
+    $stmt = $conn->prepare("
+        SELECT po.id, po.product_id, po.quantity, po.stock_updated
+        FROM purchase_orders po
+        WHERE po.status = 'delivered' AND po.stock_updated = 0 AND po.supplier_id = ?
+    ");
+    if ($stmt) {
+        $stmt->bind_param('i', $supplier_id);
+        $stmt->execute();
+        $delivered_orders = $stmt->get_result();
+        $stmt->close();
+    }
+} else {
+    $delivered_orders = $conn->query("
+        SELECT po.id, po.product_id, po.quantity, po.stock_updated
+        FROM purchase_orders po
+        WHERE po.status = 'delivered' AND po.stock_updated = 0
+    ");
+}
+
+if ($delivered_orders === false) {
+    error_log("DB query error (update stock): " . $conn->error);
+} elseif ($delivered_orders && $delivered_orders->num_rows > 0) {
+    while($order = $delivered_orders->fetch_assoc()){
+        $product_id = $order['product_id'];
+        $quantity_delivered = $order['quantity'];
+
+        // Update product stock
+        $conn->query("UPDATE products SET stock = stock + $quantity_delivered WHERE id = $product_id");
+
+        // Mark order as stock updated
+        $conn->query("UPDATE purchase_orders SET stock_updated = 1 WHERE id = ".$order['id']);
+    }
+}
+
+// ------------------ Fetch delivered orders ------------------
+$result = null;
+if ($supplier_id > 0) {
+    $stmt = $conn->prepare("
+        SELECT po.id, p.name AS product_name, po.quantity, po.status, po.created_at
+        FROM purchase_orders po
+        JOIN products p ON po.product_id = p.id
+        WHERE po.status = 'delivered' AND po.supplier_id = ?
+        ORDER BY po.id DESC
+    ");
+    if ($stmt) {
+        $stmt->bind_param('i', $supplier_id);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $stmt->close();
+    }
+} else {
+    $result = $conn->query("
+        SELECT po.id, p.name AS product_name, po.quantity, po.status, po.created_at
+        FROM purchase_orders po
+        JOIN products p ON po.product_id = p.id
+        WHERE po.status = 'delivered'
+        ORDER BY po.id DESC
+    ");
+}
+
+if ($result === false) {
+    error_log("DB query error (fetch delivered orders): " . $conn->error);
+}
 ?>
 
-<div style="max-width:1000px; margin:20px auto; padding:20px; background:#f8f8f8; border-radius:8px;">
-    <a href="dashboard.php" style="display:inline-block; margin-bottom:20px; padding:8px 15px; background:#555; color:white; border-radius:5px; text-decoration:none;"> Back </a>
-    <h2>📦 Delivered Orders (Supplier & Customer)</h2>
+<div class="main-container">
+    <!-- Back Button -->
+    <a href="dashboard.php" class="back-btn">Back</a>
 
-    <table border="1" cellpadding="10" cellspacing="0" style="width:100%; border-collapse:collapse; background:white; text-align:left;">
-        <tr style="background:#ddd;">
-            <th>Serial</th>
-            <th>Source</th>
-            <th>Product</th>
-            <th>Quantity</th>
-            <th>Price</th>
-            <th>Total</th>
-            <th>Status</th>
-            <th>Delivered At</th>
-            <th>Invoice</th>
-            <?php if ($_SESSION['user_role'] === 'admin'): ?>
-                <th style="width:160px; text-align:center;">Action</th>
-            <?php endif; ?>
-        </tr>
-        <?php if (empty($delivered_rows)): ?>
-            <tr><td colspan="10" style="text-align:center; color:#666;">No delivered orders yet.</td></tr>
-        <?php else: ?>
-            <?php $serial = count($delivered_rows); foreach ($delivered_rows as $row): ?>
-            <tr>
-                <td><?php echo $serial--; ?></td>
-                <td><?php echo $row['source'] === 'supplier' ? 'Supplier' : 'Staff Delivered'; ?></td>
-                <td><?php echo htmlspecialchars($row['product_name']); ?></td>
-                <td><?php echo $row['quantity']; ?></td>
-                <td><?php echo number_format($row['price'], 2); ?></td>
-                <td><?php echo number_format($row['price']*$row['quantity'], 2); ?></td>
-                <td><?php echo ucfirst($row['status']); ?></td>
-                <td><?php echo $row['created_at']; ?></td>
-                <td>
-                    <?php if ($row['source'] === 'supplier'): ?>
-                        <a href="generate_supplier_invoice.php?order_id=<?php echo $row['id']; ?>" 
-                           target="_blank" 
-                           style="padding:5px 10px; background:#007bff; color:white; text-decoration:none; border-radius:3px;">Invoice</a>
-                    <?php else: ?>
-                        <a href="generate_customer_invoice.php?order_id=<?php echo $row['id']; ?>" 
-                           target="_blank" 
-                           style="padding:5px 10px; background:#2563eb; color:white; text-decoration:none; border-radius:3px;">Invoice</a>
-                    <?php endif; ?>
-                </td>
-                <?php if ($_SESSION['user_role'] === 'admin'): ?>
-                <td style="white-space:nowrap; text-align:center;">
-                    <a href="return_delivered.php?type=<?php echo $row['source']; ?>&id=<?php echo $row['id']; ?>" 
-                       onclick="return confirm('Return this delivered order? This will adjust stock.');" 
-                       style="padding:5px 10px; background:#e74c3c; color:white; text-decoration:none; border-radius:3px;">Return</a>
-                </td>
+    <h2 class="page-title">📦 Delivered Orders</h2>
+
+    <div class="table-container">
+        <table class="styled-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Product</th>
+                    <th>Quantity</th>
+                    <th>Status</th>
+                    <th>Created At</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php if($result && $result->num_rows > 0): ?>
+                    <?php while ($row = $result->fetch_assoc()): ?>
+                    <tr>
+                        <td><?php echo $row['id']; ?></td>
+                        <td><?php echo htmlspecialchars($row['product_name']); ?></td>
+                        <td><?php echo $row['quantity']; ?></td>
+                        <td><?php echo ucfirst($row['status']); ?></td>
+                        <td><?php echo $row['created_at']; ?></td>
+                    </tr>
+                    <?php endwhile; ?>
+                <?php else: ?>
+                    <tr><td colspan="5">No delivered orders found.</td></tr>
                 <?php endif; ?>
-            </tr>
-            <?php endforeach; ?>
-        <?php endif; ?>
-    </table>
+            </tbody>
+        </table>
+    </div>
 </div>
 
 <style>
-/* Responsive Grid */
-@media (max-width: 992px) {
-    .dashboard-cards {
-        grid-template-columns: repeat(2, 1fr);
-        gap: 15px;
+    .main-container {
+        max-width: 1000px;
+        margin: 40px auto;
+        background: #fff;
+        padding: 20px 30px;
+        border-radius: 8px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.1);
     }
-}
-@media (max-width: 600px) {
-    .dashboard-cards {
-        grid-template-columns: 1fr;
-        gap: 10px;
+
+    .page-title {
+        text-align: center;
+        margin-bottom: 20px;
+        color: #333;
     }
-}
+
+    .back-btn {
+        display: inline-block;
+        margin-bottom: 20px;
+        padding: 8px 15px;
+        background: #555;
+        color: white;
+        border-radius: 5px;
+        text-decoration: none;
+        transition: background 0.3s;
+    }
+
+    .back-btn:hover {
+        background: #333;
+    }
+
+    .table-container {
+        overflow-x: auto;
+    }
+
+    .styled-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0 auto;
+        font-size: 15px;
+        border-radius: 5px;
+        overflow: hidden;
+    }
+
+    .styled-table thead tr {
+        background-color: #007BFF;
+        color: #ffffff;
+        text-align: left;
+    }
+
+    .styled-table th, .styled-table td {
+        padding: 12px 15px;
+        border: 1px solid #ddd;
+    }
+
+    .styled-table tbody tr:nth-child(even) {
+        background-color: #f3f3f3;
+    }
+
+    .styled-table tbody tr:hover {
+        background-color: #e9f5ff;
+    }
 </style>
 
+
 <!-- <footer style="
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    width: 100%;
     background-color: gray;
     color: white;
     text-align: center;

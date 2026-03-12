@@ -1,73 +1,115 @@
 <?php
 session_start();
-if (!isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'staff') {
+if (!isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'supplier') {
     header("Location: ../index.php");
     exit;
 }
 
 include '../config.php';
 
-if(!isset($_GET['sell_id'])) {
-    die("Sell ID not specified.");
+$supplier_id = 0;
+if (file_exists('../includes/supplier_helpers.php')) {
+    include '../includes/supplier_helpers.php';
+    $supplier_id = getResolvedSupplierId($conn);
 }
 
-$sell_id = intval($_GET['sell_id']);
+if (!isset($_GET['order_id'])) {
+    die("Order ID not specified.");
+}
 
-// Fetch sold product info
-$stmt = $conn->prepare("SELECT sp.*, p.stock AS current_stock FROM sell_product sp LEFT JOIN products p ON sp.product_id=p.id WHERE sp.id=?");
-$stmt->bind_param("i", $sell_id);
+$order_id = intval($_GET['order_id']);
+
+// Fetch order details
+$stmt = null;
+if ($supplier_id > 0) {
+    $stmt = $conn->prepare("
+        SELECT po.id, po.quantity, po.created_at, p.name AS product_name, p.price
+        FROM purchase_orders po
+        JOIN products p ON po.product_id = p.id
+        WHERE po.id = ? AND po.supplier_id = ?
+    ");
+    $stmt->bind_param("ii", $order_id, $supplier_id);
+} else {
+    $stmt = $conn->prepare("
+        SELECT po.id, po.quantity, po.created_at, p.name AS product_name, p.price
+        FROM purchase_orders po
+        JOIN products p ON po.product_id = p.id
+        WHERE po.id = ?
+    ");
+    $stmt->bind_param("i", $order_id);
+}
 $stmt->execute();
-$result = $stmt->get_result();
-if($result->num_rows == 0) {
-    die("Invalid Sell ID.");
-}
-$order = $result->fetch_assoc();
+$order = $stmt->get_result()->fetch_assoc();
 $stmt->close();
+
+if (!$order) {
+    die("Order not found.");
+}
+
+$total_price = $order['quantity'] * $order['price'];
 ?>
 
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Invoice #<?php echo $order['id']; ?></title>
+    <title>Proforma Invoice - Order #<?php echo $order['id']; ?></title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; }
-        .invoice-box { max-width: 600px; margin:auto; padding:30px; border:1px solid #eee; border-radius:10px; box-shadow:0 0 10px rgba(0,0,0,.15); }
-        h2 { text-align:center; }
-        table { width:100%; line-height:inherit; text-align:left; border-collapse: collapse; margin-top: 20px; }
-        table th, table td { border:1px solid #ddd; padding:8px; }
-        table th { background:#f2f2f2; }
-        .total { text-align:right; margin-top:20px; font-weight:bold; }
-        .print-btn { margin-top: 20px; padding:10px 20px; background:#28a745; color:white; border:none; border-radius:5px; cursor:pointer; }
+        .invoice-box { max-width: 800px; margin: auto; padding: 30px; border: 1px solid #eee; }
+        h2 { text-align: center; margin-bottom: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        table, th, td { border: 1px solid #ddd; }
+        th, td { padding: 10px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .total { text-align: right; font-weight: bold; }
+        .button-row {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 20px;
+        }
+        .print-button, .payment-button {
+            padding: 10px 20px;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+        }
+        .print-button {
+            background: #28a745; /* Green */
+        }
+        .payment-button {
+            background: #007bff; /* Blue */
+        }
     </style>
 </head>
 <body>
+    <div class="invoice-box">
+        <h2>Proforma Invoice</h2>
 
-<div class="invoice-box">
-    <h2>Proforma Invoice</h2>
-    <p><strong>Invoice ID:</strong> <?php echo $order['id']; ?></p>
-    <p><strong>Date:</strong> <?php echo $order['created_at']; ?></p>
+        <p><strong>Order ID:</strong> <?php echo $order['id']; ?></p>
+        <p><strong>Date:</strong> <?php echo $order['created_at']; ?></p>
 
-    <table>
-        <tr>
-            <th>Product</th>
-            <th>Quantity</th>
-            <th>Price</th>
-            <th>Total</th>
-        </tr>
-        <tr>
-            <td><?php echo htmlspecialchars($order['product_name']); ?></td>
-            <td><?php echo $order['quantity']; ?></td>
-            <td><?php echo number_format($order['price'],2); ?></td>
-            <td><?php echo number_format($order['price']*$order['quantity'],2); ?></td>
-        </tr>
-    </table>
+        <table>
+            <tr>
+                <th>Product</th>
+                <th>Quantity</th>
+                <th>Price (per unit)</th>
+                <th>Total</th>
+            </tr>
+            <tr>
+                <td><?php echo htmlspecialchars($order['product_name']); ?></td>
+                <td><?php echo $order['quantity']; ?></td>
+                <td><?php echo number_format($order['price'], 2); ?></td>
+                <td><?php echo number_format($total_price, 2); ?></td>
+            </tr>
+        </table>
 
-    <div class="total">
-        Grand Total: <?php echo number_format($order['price']*$order['quantity'],2); ?>
+        <p class="total">Grand Total: <?php echo number_format($total_price, 2); ?></p>
+
+        <!-- Buttons Row -->
+        <div class="button-row">
+            <a href="javascript:window.print()" class="print-button">🖨️ Print Invoice</a>
+          
+        </div>
     </div>
-
-    <button class="print-btn" onclick="window.print();">🖨️ Print Invoice</button>
-</div>
-
 </body>
 </html>

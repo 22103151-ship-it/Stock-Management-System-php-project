@@ -1,339 +1,299 @@
 <?php
 session_start();
-if (!isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'customer') {
+if (!isset($_SESSION['user_role']) || $_SESSION['user_role'] !== 'supplier') {
     header("Location: ../index.php");
     exit;
 }
 
 include '../config.php';
-include '../includes/header.php';
 
-// Get customer_id (fallback lookup if session missing)
-$customer_id = $_SESSION['customer_id'] ?? null;
-if (!$customer_id && isset($_SESSION['user_id'])) {
-    $user_id = (int)$_SESSION['user_id'];
-    $lookup = $conn->prepare("SELECT id FROM customers WHERE user_id = ? LIMIT 1");
-    if ($lookup) {
-        $lookup->bind_param('i', $user_id);
-        $lookup->execute();
-        $res = $lookup->get_result();
-        if ($row = $res->fetch_assoc()) {
-            $customer_id = (int)$row['id'];
-            $_SESSION['customer_id'] = $customer_id;
-        }
-        $lookup->close();
-    }
+$supplier_id = 0;
+if (file_exists('../includes/supplier_helpers.php')) {
+    include '../includes/supplier_helpers.php';
+    $supplier_id = getResolvedSupplierId($conn);
 }
 
-// Get customer orders
-$orders = [];
-if (isset($conn) && $customer_id) {
-    $stmt = $conn->prepare(
-        "SELECT co.*, p.name as product_name, p.price as unit_price, p.image as product_image
-         FROM customer_orders co
-         JOIN products p ON co.product_id = p.id
-         WHERE co.customer_id = ?
-         ORDER BY co.order_date DESC"
-    );
-    if ($stmt) {
-        $stmt->bind_param('i', $customer_id);
-        $stmt->execute();
-        if (method_exists($stmt, 'get_result')) {
-            $result = $stmt->get_result();
-            $orders = $result->fetch_all(MYSQLI_ASSOC);
+// -------- Handle Status Updates --------
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['status'])) {
+    $new_delivered = 0;
+    foreach ($_POST['status'] as $order_id => $status) {
+        $order_id = intval($order_id);
+        $valid_status = ['pending', 'delivered'];
+        if (in_array($status, $valid_status)) {
+
+            // Fetch previous status to check if we need to update stock
+            if ($supplier_id > 0) {
+                $prev_stmt = $conn->prepare("SELECT status, product_id, quantity FROM purchase_orders WHERE id=? AND supplier_id=?");
+                $prev_stmt->bind_param("ii", $order_id, $supplier_id);
+            } else {
+                $prev_stmt = $conn->prepare("SELECT status, product_id, quantity FROM purchase_orders WHERE id=?");
+                $prev_stmt->bind_param("i", $order_id);
+            }
+            $prev_stmt->execute();
+            $prev_result = $prev_stmt->get_result()->fetch_assoc();
+            $prev_stmt->close();
+
+            if (!$prev_result) {
+                continue;
+            }
+
+            $prev_status = $prev_result['status'];
+            $product_id = $prev_result['product_id'];
+            $quantity = $prev_result['quantity'];
+
+            // Update order status
+            if ($supplier_id > 0) {
+                $stmt = $conn->prepare("UPDATE purchase_orders SET status=? WHERE id=? AND supplier_id=?");
+                $stmt->bind_param("sii", $status, $order_id, $supplier_id);
+            } else {
+                $stmt = $conn->prepare("UPDATE purchase_orders SET status=? WHERE id=?");
+                $stmt->bind_param("si", $status, $order_id);
+            }
+            $stmt->execute();
+            $stmt->close();
+
+            // Update product stock
+            if ($prev_status !== 'delivered' && $status === 'delivered') {
+                // Supplier delivered: increase stock
+                $stock_stmt = $conn->prepare("UPDATE products SET stock = stock + ? WHERE id=?");
+                $stock_stmt->bind_param("ii", $quantity, $product_id);
+                $stock_stmt->execute();
+                $stock_stmt->close();
+                $new_delivered++;
+            } elseif ($prev_status === 'delivered' && $status !== 'delivered') {
+                // If status changed back from delivered to pending: decrease stock
+                $stock_stmt = $conn->prepare("UPDATE products SET stock = stock - ? WHERE id=?");
+                $stock_stmt->bind_param("ii", $quantity, $product_id);
+                $stock_stmt->execute();
+                $stock_stmt->close();
+            }
         }
-        $stmt->close();
     }
+    // compute pending remaining
+    if ($supplier_id > 0) {
+        $pending_res = $conn->query("SELECT COUNT(*) AS cnt FROM purchase_orders WHERE status='pending' AND supplier_id=" . (int)$supplier_id);
+    } else {
+        $pending_res = $conn->query("SELECT COUNT(*) AS cnt FROM purchase_orders WHERE status='pending'");
+    }
+    $pending_row = $pending_res ? $pending_res->fetch_assoc() : null;
+    $pending_remaining = $pending_row ? intval($pending_row['cnt']) : 0;
+
+    $_SESSION['flash_message'] = "🫵 $pending_remaining pending remaining / 👌 $new_delivered delivered successfully";
+
+    header("Location: my_orders.php");
+    exit;
+}
+
+// include header after handling POST so header() redirects work before output
+include '../includes/header.php';
+// if POST updates occurred, we may have set a flash message in the session
+if (isset($_SESSION['flash_message'])) {
+    $flash = $_SESSION['flash_message'];
+    unset($_SESSION['flash_message']);
+} else {
+    $flash = null;
+}
+
+// -------- Fetch Orders --------
+$orders = null;
+if ($supplier_id > 0) {
+    $orders = $conn->query("
+        SELECT po.id, p.name AS product_name, po.quantity, po.status, po.created_at, p.price
+        FROM purchase_orders po
+        JOIN products p ON po.product_id = p.id
+        WHERE po.supplier_id = " . (int)$supplier_id . "
+        ORDER BY po.id DESC
+    ");
+} else {
+    $orders = $conn->query("
+        SELECT po.id, p.name AS product_name, po.quantity, po.status, po.created_at, p.price
+        FROM purchase_orders po
+        JOIN products p ON po.product_id = p.id
+        ORDER BY po.id DESC
+    ");
 }
 ?>
 
-<style>
-        :root {
-            --bg-color: #f4f7fc;
-            --main-color: #2c3e50;
-            --accent-color: #3498db;
-            --card-bg: #ffffff;
-            --border-color: #e1e8ed;
-            --shadow-color: rgba(0, 0, 0, 0.1);
-            --text-color: #2c3e50;
-            --success-color: #27ae60;
-            --warning-color: #f39c12;
-            --danger-color: #e74c3c;
-        }
-
-        body {
-            font-family: 'Poppins', sans-serif;
-            background-color: var(--bg-color);
-            margin: 0;
-            padding: 0;
-        }
-
-        .page-header {
-            text-align: center;
-            margin-bottom: 30px;
-            padding: 20px;
-            background: linear-gradient(135deg, var(--main-color), var(--accent-color));
-            color: white;
-            border-radius: 8px;
-        }
-
-        .page-header h1 {
-            margin: 0;
-            font-size: 2rem;
-            font-weight: 700;
-        }
-
-        .orders-table {
-            background: var(--card-bg);
-            border-radius: 8px;
-            box-shadow: 0 2px 10px var(--shadow-color);
-            overflow: hidden;
-        }
-
-        .orders-table table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        .orders-table th,
-        .orders-table td {
-            padding: 15px;
-            text-align: left;
-            border-bottom: 1px solid var(--border-color);
-        }
-
-        .orders-table th {
-            background: #f8f9fa;
-            font-weight: 600;
-            color: var(--text-color);
-        }
-
-        .orders-table tbody tr:hover {
-            background: #f8f9fa;
-        }
-
-        .status-badge {
-            padding: 5px 10px;
-            border-radius: 20px;
-            font-size: 0.85rem;
-            font-weight: 500;
-            text-transform: uppercase;
-        }
-
-        .status-pending {
-            background: #fff3cd;
-            color: #856404;
-        }
-
-        .status-delivered {
-            background: #d4edda;
-            color: #155724;
-        }
-
-        .status-returned {
-            background: #f8d7da;
-            color: #721c24;
-        }
-
-        .status-shipped {
-            background: #e0f2fe;
-            color: #0f3d67;
-        }
-
-        .order-total {
-            font-weight: 600;
-            color: var(--accent-color);
-        }
-
-        .no-orders {
-            text-align: center;
-            padding: 50px;
-            color: #7f8c8d;
-            font-size: 1.2rem;
-        }
-
-        .action-btn {
-            padding: 6px 12px;
-            border: none;
-            border-radius: 4px;
-            font-size: 0.85rem;
-            font-weight: 500;
-            cursor: pointer;
-            text-decoration: none;
-            display: inline-block;
-            transition: background 0.2s;
-        }
-
-        .btn-success {
-            background: var(--success-color);
-            color: white;
-        }
-
-        .btn-success:hover {
-            background: #229954;
-        }
-
-        .btn-danger {
-            background: var(--danger-color);
-            color: white;
-        }
-
-        .btn-danger:hover {
-            background: #c0392b;
-        }
-
-        @media (max-width: 768px) {
-            .orders-table {
-                overflow-x: auto;
-            }
-
-            .orders-table table {
-                min-width: 600px;
-            }
-        }
-
-        .back-navigation {
-            margin-bottom: 20px;
-        }
-
-        .back-btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 10px 20px;
-            background: var(--accent-color);
-            color: white;
-            text-decoration: none;
-            border-radius: 6px;
-            font-weight: 500;
-            transition: background 0.2s;
-            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
-        }
-
-        .back-btn:hover {
-            background: #2980b9;
-            color: white;
-        }
-
-        .back-btn i {
-            font-size: 0.9rem;
-        }
-    </style>
-
-    <div class="page-header">
-        <h1>My Order History</h1>
-    </div>
-
-    <div class="back-navigation">
-        <a href="dashboard.php" class="back-btn">
-            <i class="fas fa-arrow-left"></i> Back to Dashboard
-        </a>
-    </div>
-
-    <?php if (isset($_GET['msg']) && $_GET['msg'] === 'received'): ?>
-        <div class="message success-message" style="margin-bottom:16px;">Order marked as received successfully.</div>
-    <?php elseif (isset($_GET['msg']) && $_GET['msg'] === 'invalid'): ?>
-        <div class="message error-message" style="margin-bottom:16px;">Unable to mark as received.</div>
+<div class="main-container">
+    <?php if (!empty($flash)): ?>
+        <div id="flash-message" class="flash-message"><?php echo htmlspecialchars($flash); ?></div>
     <?php endif; ?>
+    <!-- Back Button -->
+    <a href="dashboard.php" class="back-btn">Back</a>
 
-    <?php if (empty($orders)): ?>
-        <div class="no-orders">
-            <i class="fa-solid fa-shopping-cart" style="font-size: 3rem; margin-bottom: 20px; display: block;"></i>
-            <p>You haven't placed any orders yet.</p>
-            <a href="products.php" class="action-btn btn-success" style="margin-top: 20px;">
-                <i class="fa-solid fa-plus"></i> Start Shopping
-            </a>
-        </div>
-    <?php else: ?>
-        <div class="orders-table">
-            <table>
+    <h2 class="page-title">📦 My Orders</h2>
+
+    <form method="post" action="my_orders.php">
+        <div class="table-container">
+            <table class="styled-table">
                 <thead>
                     <tr>
-                        <th>Serial</th>
+                        <th>ID</th>
                         <th>Product</th>
-                        <th>Image</th>
                         <th>Quantity</th>
-                        <th>Unit Price</th>
-                        <th>Total</th>
+                        <th>Price (per unit)</th>
+                        <th>Total Price</th>
                         <th>Status</th>
-                        <th>Date</th>
-                        <th>Actions</th>
+                        <th>Created At</th>
+                        <th>Invoice</th>
                     </tr>
                 </thead>
                 <tbody>
-                    <?php $serial = count($orders); foreach ($orders as $order): ?>
+                    <?php if ($orders && $orders->num_rows > 0): ?>
+                        <?php while($o = $orders->fetch_assoc()): ?>
                         <tr>
-                            <td><?php echo $serial--; ?></td>
-                            <td><?php echo htmlspecialchars($order['product_name']); ?></td>
+                            <td><?php echo $o['id']; ?></td>
+                            <td><?php echo htmlspecialchars($o['product_name']); ?></td>
+                            <td><?php echo $o['quantity']; ?></td>
+                            <td><?php echo number_format($o['price'], 2); ?></td>
+                            <td><?php echo number_format($o['quantity'] * $o['price'], 2); ?></td>
                             <td>
-                                <?php if (!empty($order['product_image'])): ?>
-                                    <img src="../assets/images/<?php echo htmlspecialchars($order['product_image']); ?>" alt="<?php echo htmlspecialchars($order['product_name']); ?>" style="width:60px; height:60px; object-fit:cover; border-radius:6px; border:1px solid #e5e7eb; background:#f0f2f5;">
-                                <?php else: ?>
-                                    <div style="width:60px; height:60px; display:flex; align-items:center; justify-content:center; border:1px solid #e5e7eb; border-radius:6px; background:#f8fafc; color:#94a3b8;">
-                                        <i class="fa-solid fa-box"></i>
-                                    </div>
-                                <?php endif; ?>
+                                <select name="status[<?php echo $o['id']; ?>]" class="status-select">
+                                    <option value="pending"   <?php if ($o['status']=='pending') echo 'selected'; ?>>Pending</option>
+                                    <option value="delivered" <?php if ($o['status']=='delivered') echo 'selected'; ?>>Delivered</option>
+                                </select>
                             </td>
-                            <td><?php echo $order['quantity']; ?></td>
-                            <td>৳<?php echo number_format($order['unit_price'], 2); ?></td>
-                            <td class="order-total">৳<?php echo number_format($order['unit_price'] * $order['quantity'], 2); ?></td>
+                            <td><?php echo $o['created_at']; ?></td>
                             <td>
-                                <span class="status-badge status-<?php echo strtolower($order['status']); ?>">
-                                    <?php echo ucfirst($order['status']); ?>
-                                </span>
-                                <?php if ($order['status'] === 'confirmed'): ?>
-                                    <div style="margin-top:6px;" class="status-badge status-pending">Awaiting admin grant</div>
-                                <?php elseif ($order['status'] === 'shipped'): ?>
-                                    <div style="margin-top:6px;" class="status-badge status-pending">Delivery processing</div>
-                                <?php elseif ($order['status'] === 'delivered'): ?>
-                                    <div style="margin-top:6px;" class="status-badge status-delivered">Received by you</div>
-                                <?php endif; ?>
-                            </td>
-                            <td><?php echo date('M d, Y', strtotime($order['order_date'] ?? ($order['created_at'] ?? 'now'))); ?></td>
-                            <td>
-                                <?php if ($order['status'] === 'pending'): ?>
-                                    <button class="action-btn btn-danger" onclick="cancelOrder(<?php echo $order['id']; ?>)">
-                                        <i class="fa-solid fa-times"></i> Cancel
-                                    </button>
-                                <?php elseif ($order['status'] === 'shipped'): ?>
-                                    <form method="POST" action="confirm_received.php" style="margin:0;">
-                                        <input type="hidden" name="order_id" value="<?php echo $order['id']; ?>">
-                                        <button class="action-btn btn-success" type="submit">
-                                            <i class="fa-solid fa-check"></i> Received Product
-                                        </button>
-                                    </form>
-                                <?php elseif ($order['status'] === 'delivered'): ?>
-                                    <a class="action-btn btn-success" href="generate_invoice.php?order_id=<?php echo $order['id']; ?>" target="_blank">
-                                        <i class="fa-solid fa-file-invoice"></i> Invoice
-                                    </a>
-                                    <button class="action-btn btn-success" onclick="returnOrder(<?php echo $order['id']; ?>)">
-                                        <i class="fa-solid fa-undo"></i> Return
-                                    </button>
-                                <?php endif; ?>
+                                <a href="generate_invoice.php?order_id=<?php echo $o['id']; ?>" target="_blank" class="invoice-btn">Proforma Invoice</a>
                             </td>
                         </tr>
-                    <?php endforeach; ?>
+                        <?php endwhile; ?>
+                    <?php else: ?>
+                        <tr><td colspan="8" style="text-align:center;">No orders yet.</td></tr>
+                    <?php endif; ?>
                 </tbody>
             </table>
         </div>
-    <?php endif; ?>
 
-    <script>
-        function cancelOrder(orderId) {
-            if (confirm('Are you sure you want to cancel this order?')) {
-                // In a real system, you'd make an AJAX call to cancel the order
-                alert('Order cancellation feature would be implemented here.');
-            }
-        }
-
-        function returnOrder(orderId) {
-            if (confirm('Are you sure you want to return this order?')) {
-                // In a real system, you'd make an AJAX call to return the order
-                alert('Order return feature would be implemented here.');
-            }
-        }
-    </script>
-
+        <!-- Save Button -->
+        <div class="action-btn">
+            <button type="submit" class="btn-primary">💾 Save Changes</button>
+        </div>
+    </form>
 </div>
 
-<?php include '../includes/footer.php'; ?>
+<style>
+    .main-container {
+        max-width: 1100px;
+        margin: 40px auto;
+        background: #fff;
+        padding: 20px 30px;
+        border-radius: 8px;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+    }
+
+    .page-title {
+        text-align: center;
+        margin-bottom: 20px;
+        color: #333;
+    }
+
+    .back-btn {
+        display: inline-block;
+        margin-bottom: 20px;
+        padding: 8px 15px;
+        background: #555;
+        color: white;
+        border-radius: 5px;
+        text-decoration: none;
+        transition: background 0.3s;
+    }
+
+    .back-btn:hover {
+        background: #333;
+    }
+
+    .table-container {
+        overflow-x: auto;
+    }
+
+    .styled-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 0 auto;
+        font-size: 15px;
+        border-radius: 5px;
+        overflow: hidden;
+    }
+
+    .styled-table thead tr {
+        background-color: #007BFF;
+        color: #ffffff;
+        text-align: left;
+    }
+
+    .styled-table th, .styled-table td {
+        padding: 12px 15px;
+        border: 1px solid #ddd;
+    }
+
+    .styled-table tbody tr:nth-child(even) {
+        background-color: #f9f9f9;
+    }
+
+    .styled-table tbody tr:hover {
+        background-color: #e9f5ff;
+    }
+
+    .status-select {
+        padding: 5px;
+        border-radius: 4px;
+        border: 1px solid #ccc;
+    }
+
+    .invoice-btn {
+        padding: 6px 12px;
+        background: #007bff;
+        color: white;
+        text-decoration: none;
+        border-radius: 4px;
+        transition: background 0.3s;
+    }
+
+    .invoice-btn:hover {
+        background: #0056b3;
+    }
+
+    .action-btn {
+        margin-top: 15px;
+        text-align: left;
+    }
+
+    .btn-primary {
+        padding: 10px 18px;
+        background: #28a745;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 15px;
+        transition: background 0.3s;
+    }
+
+    .btn-primary:hover {
+        background: #218838;
+    }
+    .flash-message {
+        padding: 12px 16px;
+        border-radius: 8px;
+        margin-bottom: 16px;
+        background: #e6ffed;
+        color: #14532d;
+        border: 1px solid #c7f0d6;
+        box-shadow: 0 2px 6px rgba(20,83,45,0.08);
+        font-weight: 600;
+    }
+</style>
+
+<script>
+    (function(){
+        var el = document.getElementById('flash-message');
+        if(!el) return;
+        setTimeout(function(){
+            el.style.transition = 'opacity 0.5s';
+            el.style.opacity = '0';
+            setTimeout(function(){ el.remove(); }, 500);
+        }, 5000);
+    })();
+</script>

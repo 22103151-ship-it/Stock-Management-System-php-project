@@ -1,55 +1,71 @@
 <?php
 session_start();
-include '../config.php';
+include 'config.php';
 
-$message = '';
-$message_type = '';
+// Get role parameter from URL
+$role_filter = isset($_GET['role']) ? $_GET['role'] : null;
+$error_msg = '';
 
-if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-    $login = trim($_POST['email']); // Can be email or phone
+if (isset($_POST['login'])) {
+    $email = $_POST['email'];
     $password = $_POST['password'];
 
-    if (empty($login) || empty($password)) {
-        $message = "Please enter email/phone and password.";
-        $message_type = "error";
-    } else {
-        // Check if user exists by email or phone
-        $query = "SELECT u.id, u.password, u.role, c.id as customer_id, c.name, c.customer_type
-                  FROM users u
-                  JOIN customers c ON u.id = c.user_id
-                  WHERE (c.email = ? OR c.phone = ?) AND u.role = 'customer'";
-        $stmt = $conn->prepare($query);
-        if (!$stmt) {
-            $message = 'Database error: failed to prepare statement.';
-            $message_type = 'error';
-        } else {
-            $stmt->bind_param("ss", $login, $login);
-            $stmt->execute();
-            $result = $stmt->get_result();
+    $stmt = $conn->prepare("SELECT id, name, password, role FROM users WHERE email=? LIMIT 1");
+    $stmt->bind_param("s", $email);
+    $stmt->execute();
+    $stmt->store_result();
 
-            if ($result->num_rows == 1) {
-                $user = $result->fetch_assoc();
+    if ($stmt->num_rows > 0) {
+        $stmt->bind_result($id, $name, $db_password, $role);
+        $stmt->fetch();
 
-                if (password_verify($password, $user['password'])) {
-                    // Set session variables
-                    $_SESSION['user_id'] = $user['id'];
-                    $_SESSION['user_role'] = $user['role'];
-                    $_SESSION['user_name'] = $user['name'];
-                    $_SESSION['customer_id'] = $user['customer_id'];
-                    $_SESSION['customer_type'] = $user['customer_type'];
+        // Check if user's role matches the requested role (if role was specified)
+        if ($role_filter && $role !== $role_filter) {
+            $error_msg = "This account is not registered as a " . ucfirst($role_filter) . ".";
+        } elseif ($password === $db_password) {
+            $_SESSION['user_id'] = $id;
+            $_SESSION['user_name'] = $name;
+            $_SESSION['user_role'] = $role;
 
-                    header("Location: dashboard.php");
-                    exit;
-                } else {
-                    $message = "Invalid password.";
-                    $message_type = "error";
+            // For customers, also set customer_id
+            if ($role == 'customer') {
+                $customer_stmt = $conn->prepare("SELECT id FROM customers WHERE user_id = ? LIMIT 1");
+                $customer_stmt->bind_param("i", $id);
+                $customer_stmt->execute();
+                $customer_stmt->bind_result($customer_id);
+                if ($customer_stmt->fetch()) {
+                    $_SESSION['customer_id'] = $customer_id;
                 }
-            } else {
-                $message = "No account found with this email/phone.";
-                $message_type = "error";
+                $customer_stmt->close();
             }
+
+            if ($role == 'admin') {
+                header("Location: admin/dashboard.php");
+            } elseif ($role == 'staff') {
+                header("Location: staff/dashboard.php");
+            } elseif ($role == 'supplier') {
+                header("Location: supplier/dashboard.php");
+            } elseif ($role == 'customer') {
+                header("Location: customer/dashboard.php");
+            }
+            exit;
+        } else {
+            $error_msg = "Invalid password!";
         }
+    } else {
+        $error_msg = "No user found with that email!";
     }
+}
+
+// Get role title for display
+$role_title = $role_filter ? ucfirst($role_filter) : 'User';
+
+// Determine back URL: prefer home when role specified or referrer contains home.php
+$back_url = 'index.php';
+if ($role_filter) {
+    $back_url = 'home.php';
+} elseif (!empty($_SERVER['HTTP_REFERER']) && strpos($_SERVER['HTTP_REFERER'], 'home.php') !== false) {
+    $back_url = 'home.php';
 }
 ?>
 
@@ -58,26 +74,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Customer Login - Stock Management System</title>
-
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-
+    <title>Login - Stock Management System</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-
+    
     <style>
-        :root {
-            --bg-color: #f4f7fc;
-            --main-color: #2c3e50;
-            --accent-color: #3498db;
-            --card-bg: #ffffff;
-            --border-color: #e1e8ed;
-            --success-color: #27ae60;
-            --error-color: #e74c3c;
-            --text-color: #2c3e50;
-        }
-
         * {
             margin: 0;
             padding: 0;
@@ -85,190 +85,212 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         }
 
         body {
-            font-family: 'Poppins', sans-serif;
-            background: linear-gradient(135deg, var(--bg-color) 0%, #e8f4f8 100%);
+            font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: url('assets/images/home-bg.jpg') center/cover fixed;
             min-height: 100vh;
             display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background: rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(10px);
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
             align-items: center;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: 700;
+            color: white;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        .back-link {
+            color: white;
+            text-decoration: none;
+            font-weight: 600;
+            transition: opacity 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .back-link:hover {
+            opacity: 0.8;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
             justify-content: center;
-            padding: 20px;
+            align-items: center;
+            padding: 30px 20px;
         }
 
         .login-container {
-            background: var(--card-bg);
-            border-radius: 15px;
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+            background: rgba(255, 255, 255, 0.18);
+            backdrop-filter: blur(14px);
+            border-radius: 16px;
             padding: 40px;
+            box-shadow: 0 22px 60px rgba(0, 0, 0, 0.35);
             width: 100%;
             max-width: 400px;
-            position: relative;
-            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.28);
         }
 
-        .login-container::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 5px;
-            background: linear-gradient(90deg, var(--accent-color), var(--success-color));
-        }
-
-        .logo-section {
+        .login-header {
             text-align: center;
             margin-bottom: 30px;
         }
 
-        .logo-section h1 {
-            color: var(--main-color);
-            font-size: 2rem;
-            margin-bottom: 10px;
-            font-weight: 700;
+        .login-header h1 {
+            font-size: 28px;
+            color: #111;
+            margin-bottom: 5px;
         }
 
-        .logo-section p {
-            color: #666;
-            font-size: 0.9rem;
+        .login-header p {
+            color: #222;
+            font-size: 14px;
         }
 
         .form-group {
-            margin-bottom: 20px;
+            margin-bottom: 16px;
         }
 
-        .form-group label {
+        label {
             display: block;
-            margin-bottom: 5px;
-            color: var(--text-color);
-            font-weight: 500;
-            font-size: 0.9rem;
+            margin-bottom: 8px;
+            color: #111;
+            font-weight: 700;
+            font-size: 14px;
         }
 
-        .form-group input {
+        input[type="email"],
+        input[type="password"] {
             width: 100%;
-            padding: 12px 15px;
-            border: 2px solid var(--border-color);
+            padding: 12px;
+            border: 1px solid rgba(17, 17, 17, 0.2);
             border-radius: 8px;
-            font-size: 1rem;
-            transition: all 0.3s ease;
-            background: #f8f9fa;
+            font-size: 14px;
+            transition: border-color 0.3s, box-shadow 0.3s;
+            font-family: 'Poppins', sans-serif;
+            background: rgba(255, 255, 255, 0.8);
+            color: #111;
         }
 
-        .form-group input:focus {
+        input[type="email"]:focus,
+        input[type="password"]:focus {
             outline: none;
-            border-color: var(--accent-color);
-            background: white;
-            box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+            border-color: rgba(17, 17, 17, 0.45);
+            box-shadow: 0 0 0 3px rgba(17, 17, 17, 0.1);
         }
 
-        .btn {
+        .login-btn {
             width: 100%;
-            padding: 15px;
-            background: linear-gradient(135deg, var(--accent-color), #2980b9);
-            color: white;
-            border: none;
+            padding: 12px;
+            background: linear-gradient(135deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.65));
+            color: #111;
+            border: 1px solid rgba(17, 17, 17, 0.08);
             border-radius: 8px;
-            font-size: 1rem;
-            font-weight: 600;
+            font-size: 16px;
+            font-weight: 700;
             cursor: pointer;
-            transition: all 0.3s ease;
-            margin-top: 10px;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin-top: 20px;
+            backdrop-filter: blur(6px);
         }
 
-        .btn:hover {
+        .login-btn:hover {
             transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(52, 152, 219, 0.3);
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
         }
 
-        .message {
-            padding: 12px 15px;
+        .login-btn:active {
+            transform: translateY(0);
+        }
+
+        .error-msg {
+            background: rgba(255, 238, 238, 0.8);
+            color: #b91c1c;
+            padding: 12px;
             border-radius: 8px;
             margin-bottom: 20px;
-            font-weight: 500;
+            border-left: 4px solid #b91c1c;
+            font-size: 14px;
+            backdrop-filter: blur(6px);
         }
 
-        .message.error {
-            background: rgba(231, 76, 60, 0.1);
-            color: var(--error-color);
-            border: 1px solid rgba(231, 76, 60, 0.2);
+        .role-badge {
+            display: inline-block;
+            background: rgba(255, 255, 255, 0.8);
+            color: #111;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 700;
+            margin-left: 8px;
+            border: 1px solid rgba(17, 17, 17, 0.08);
         }
 
-        .register-link {
-            text-align: center;
-            margin-top: 20px;
-            padding-top: 20px;
-            border-top: 1px solid var(--border-color);
-        }
-
-        .register-link a {
-            color: var(--accent-color);
-            text-decoration: none;
-            font-weight: 500;
-        }
-
-        .register-link a:hover {
-            text-decoration: underline;
-        }
-
-        .back-link {
-            text-align: center;
-            margin-top: 15px;
-        }
-
-        .back-link a {
-            color: #666;
-            text-decoration: none;
-            font-size: 0.9rem;
-        }
-
-        .back-link a:hover {
-            color: var(--main-color);
-        }
-
-        @media (max-width: 600px) {
+        @media (max-width: 768px) {
             .login-container {
                 padding: 30px 20px;
+            }
+
+            .login-header h1 {
+                font-size: 24px;
             }
         }
     </style>
 </head>
 <body>
-    <div class="login-container">
-        <div class="logo-section">
-            <h1><i class="fas fa-sign-in-alt"></i> Customer Login</h1>
-            <p>Access your account</p>
+    <header>
+        <div class="logo">
+            📦 Stock Management System
         </div>
+        <a href="<?php echo htmlspecialchars($back_url); ?>" class="back-link">
+            <i class="fas fa-arrow-left"></i> Back
+        </a>
+    </header>
 
-        <?php if ($message): ?>
-            <div class="message <?php echo $message_type; ?>">
-                <i class="fas fa-<?php echo $message_type === 'error' ? 'exclamation-triangle' : 'check-circle'; ?>"></i>
-                <?php echo $message; ?>
-            </div>
-        <?php endif; ?>
-
-        <form method="POST" action="">
-            <div class="form-group">
-                <label for="email">Email or Phone Number</label>
-                <input type="text" id="email" name="email" required placeholder="Enter email or 11-digit phone" value="<?php echo isset($_POST['email']) ? htmlspecialchars($_POST['email']) : ''; ?>">
-            </div>
-
-            <div class="form-group">
-                <label for="password">Password</label>
-                <input type="password" id="password" name="password" required>
+    <main>
+        <div class="login-container">
+            <div class="login-header">
+                <h1>Login</h1>
+                <?php if ($role_filter): ?>
+                    <p>Sign in as <span class="role-badge"><?php echo ucfirst($role_filter); ?></span></p>
+                <?php else: ?>
+                    <p>Enter your credentials to continue</p>
+                <?php endif; ?>
             </div>
 
-            <button type="submit" class="btn">
-                <i class="fas fa-sign-in-alt"></i> Login
-            </button>
-        </form>
+            <?php if ($error_msg): ?>
+                <div class="error-msg">
+                    <i class="fas fa-exclamation-circle"></i> <?php echo $error_msg; ?>
+                </div>
+            <?php endif; ?>
 
-        <div class="register-link">
-            <p>Don't have an account? <a href="register.php">Register here</a></p>
-        </div>
+            <form action="<?php echo $role_filter ? 'login.php?role=' . htmlspecialchars($role_filter) : 'login.php'; ?>" method="POST">
+                <div class="form-group">
+                    <label for="email">Email Address</label>
+                    <input type="email" id="email" name="email" placeholder="Enter your email" required>
+                </div>
 
-        <div class="back-link">
-            <a href="../index.php"><i class="fas fa-arrow-left"></i> Back to Home</a>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" placeholder="Enter your password" required>
+                </div>
+
+                <button type="submit" name="login" class="login-btn">
+                    <i class="fas fa-sign-in-alt"></i> Login
+                </button>
+            </form>
         </div>
-    </div>
+    </main>
 </body>
 </html>
