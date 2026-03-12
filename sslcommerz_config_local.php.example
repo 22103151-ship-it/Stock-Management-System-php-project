@@ -1,0 +1,11 @@
+<?php
+
+// Copy this file to `includes/sslcommerz_config_local.php` and set real credentials.
+// Keep this file out of git.
+
+$SSLCOMMERZ_SANDBOX = true; // set false for live
+
+$SSLCOMMERZ_STORE_ID = 'YOUR_REAL_STORE_ID';
+$SSLCOMMERZ_STORE_PASS = 'YOUR_REAL_STORE_PASSWORD';
+
+$SSLCOMMERZ_CURRENCY = 'BDT';
